@@ -1,79 +1,143 @@
 import express from 'express';
-import { PuppeteerWebBaseLoader, Page, Browser } from '@langchain/community/document_loaders/web/puppeteer';
+import {
+  PuppeteerWebBaseLoader,
+  Page,
+  Browser,
+} from '@langchain/community/document_loaders/web/puppeteer';
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { pull } from 'langchain/hub';
-import { MemoryVectorStore } from 'langchain/vectorstores/memory';
 import { ChatMistralAI, MistralAIEmbeddings } from '@langchain/mistralai';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { Document } from 'langchain/document';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { createStuffDocumentsChain } from 'langchain/chains/combine_documents';
 import { HtmlToTextTransformer } from '@langchain/community/document_transformers/html_to_text';
-import { MozillaReadabilityTransformer } from '@langchain/community/document_transformers/mozilla_readability';
 import * as cheerio from 'cheerio';
+import { PromptTemplate } from '@langchain/core/prompts';
+import { DocumentInterface } from '@langchain/core/documents';
+import { Pinecone } from '@pinecone-database/pinecone';
+import { PineconeStore } from '@langchain/pinecone';
 
 const router = express.Router();
 
 type EmojiResponse = string[];
 
-router.get<{}, EmojiResponse>('/', async (req, res) => {
-  const loader = new PuppeteerWebBaseLoader('https://js.langchain.com/v0.2/docs/integrations/document_loaders/web_loaders/web_cheerio', {
-    launchOptions: {
-      headless: 'new',
+const scrapeAndCleanData = async (url: string):  Promise<Document<Record<string, any>>[]> => {
+  const loader = new PuppeteerWebBaseLoader(
+    url,
+    {
+      launchOptions: {
+        headless: 'new',
+      },
+      async evaluate(page: Page, browser: Browser) {
+        const textContent = await page.evaluate(() => {
+          const bodyElement = document.querySelector('body');
+          return bodyElement?.textContent ?? '';
+        });
+        await browser.close();
+        return textContent ?? '';
+      },
     },
-    async evaluate(page: Page, browser: Browser) {
-      const textContent = await page.evaluate(() => {
-        const bodyElement = document.querySelector('body');
-        return bodyElement?.textContent ?? '' ;
-      });
-      await browser.close();
-      return textContent ?? '';
-    },
-  });
+  );
 
   const docs = await loader.load();
   const pageContent = docs[0].pageContent;
-  const $ = cheerio.load(pageContent);  
+  const $ = cheerio.load(pageContent);
   $('script, style').remove();
-  const cleanedText = $('body').html()?.replace(/<style[^>]*>.*<\/style>/gms, '');
+  const cleanedText = $('body')
+    .html()
+    ?.replace(/<style[^>]*>.*<\/style>/gms, '');
   const cleaned$ = cheerio.load(cleanedText!);
 
   const textContent = cleaned$('body').text();
 
   const docsC = textContent.replace(/[^\x20-\x7E]+/g, '');
 
-  const documents =  [new Document( { pageContent: docsC } )];
+  const documents = [new Document({ pageContent: docsC })];
+  return documents;
+};
 
-  console.log('docs', documents);
-
+const splitDocuments = async (documents: Document<Record<string, any>>[]) : Promise<DocumentInterface<Record<string, any>>[]>  => {
   const transformer = new HtmlToTextTransformer();
-  const transformer2 = new MozillaReadabilityTransformer();
+  // const transformer2 = new MozillaReadabilityTransformer();
 
   const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 500,
-    chunkOverlap: 100,
+    chunkSize: 1000,
+    chunkOverlap: 200,
   });
 
   // const transformer = new HtmlToTextTransformer();
-  const sequence  = splitter.pipe(transformer2);
+  const sequence = splitter.pipe(transformer);
   const split = await sequence.invoke(documents);
-  // console.log('split length', split);
-  // console.log('split length', split.length);
-  // console.log('page content', split[10].pageContent);
-  // console.log('meta 1', split[0].metadata);
-  // console.log('meta 2', split[2].metadata);
+  return split;
+};
 
-  const vectorStore = await MemoryVectorStore.fromDocuments(
-    split,
-    new MistralAIEmbeddings({
-      // batchSize: 200000,
-    }),
+const pinecone = new Pinecone({
+  apiKey: process.env.PINECONE_API_KEY!,
+});
+
+const pineconeIndex = pinecone.Index('bisabilitas-1024');
+
+export interface TypedRequestBody<T> extends Express.Request {
+  body: T
+}
+
+interface AiRequestBody {
+  url: string;
+  question: string;
+  history: Record<string, any>;
+}
+
+router.get<{}, EmojiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res) => {
+
+  const { url, history, question } = req.body;
+
+
+  const vectorDimension = 1024;  // Adjust this to your model's embedding size
+  const zeroVector = new Array(vectorDimension).fill(0);
+
+  const existingVectors = await pineconeIndex.namespace(url).query({
+    vector: zeroVector,
+    topK: 3,
+  });
+
+  console.log('existing vec', existingVectors.matches);
+  console.log('vec length', existingVectors.matches.length);
+
+  const documents = await scrapeAndCleanData(url);
+  const splitted = await splitDocuments(documents);  
+
+  const vectorStore = await PineconeStore.fromDocuments(
+    splitted,
+    new MistralAIEmbeddings(),
+    {
+      pineconeIndex,
+      namespace: req.body.url,
+    },
   );
 
-  console.log('berhasil lewat vector store');
+  // const vectorStore = await MemoryVectorStore.fromDocuments(
+  //   splitted,
+  //   new MistralAIEmbeddings(),
+  // );
 
   const retriever = vectorStore.asRetriever();
+
+  const template = `Use the following pieces of context to answer the question at the end.
+If you don't know the answer, just say that you don't know, don't try to make up an answer.
+Use four sentences maximum and keep the answer as concise as possible.
+Always provide the evidence of the context that you used for your response.
+
+{context}
+
+Question: {question}
+
+Helpful Answer:`;
+
+  const customRagPrompt = PromptTemplate.fromTemplate(template);
+
   const prompt = await pull<ChatPromptTemplate>('rlm/rag-prompt');
+
   const llm = new ChatMistralAI({
     model: 'mistral-large-latest',
     temperature: 0,
@@ -81,19 +145,22 @@ router.get<{}, EmojiResponse>('/', async (req, res) => {
 
   const ragChain = await createStuffDocumentsChain({
     llm,
-    prompt,
+    prompt: customRagPrompt,
     outputParser: new StringOutputParser(),
   });
 
-  const retrievedDocs = await retriever.invoke('what project the owner build that won competition, and what is used for?');
+  const retrievedDocs = await retriever.invoke(
+    question,
+  );
 
   console.log('lenght context', retrievedDocs.length);
-  console.log('context diambil id', retrievedDocs[0].id);
-  console.log('context diambil', retrievedDocs[0].pageContent);
-  console.log('context diambil metadata', retrievedDocs[0].metadata);
+  console.log('lenght context', retrievedDocs[0]);
+  // console.log('context diambil id', retrievedDocs[0].id);
+  // console.log('context diambil', retrievedDocs[0].pageContent);
+  // console.log('context diambil metadata', retrievedDocs[0].metadata);
 
   const coba = await ragChain.invoke({
-    question: 'what project the owner build that won competition, and what is used for?',
+    question: question,
     context: retrievedDocs,
   });
 
