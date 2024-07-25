@@ -20,11 +20,18 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@langchain/community": "^0.2.20",
+    "@langchain/core": "^0.2.18",
+    "@langchain/mistralai": "^0.0.26",
+    "@mistralai/mistralai": "^0.5.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "helmet": "^7.1.0",
-    "morgan": "^1.10.0"
+    "html-to-text": "^9.0.5",
+    "langchain": "^0.2.11",
+    "morgan": "^1.10.0",
+    "puppeteer": "^19.11.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
