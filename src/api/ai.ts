@@ -40,6 +40,8 @@ const scrapeAndCleanData = async (url: string):  Promise<Document<Record<string,
   const docs = await loader.load();
   const pageContent = docs[0].pageContent;
 
+  // console.log(pageContent);
+
   const $ = cheerio.load(pageContent);
 
   $('script, style').remove();
@@ -109,21 +111,42 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
     includeMetadata: true,
   });
 
+  console.log(existRecords.matches);
+
+  let vectorStore: PineconeStore;
+
   if (existRecords.matches.length === 0) {
-    // console.log('ga ada vec');
+    // console.log('Creating new vector store for URL:', url);
     const documents = await scrapeAndCleanData(url);
     const splitted = await splitDocuments(documents);
-    return PineconeStore.fromDocuments(splitted, embeddings, {
+    // console.log('Splitted documents:', splitted);
+
+    // Create a new vector store and wait for it to be populated
+    vectorStore = await PineconeStore.fromDocuments(splitted, embeddings, {
       pineconeIndex,
+      textKey: 'text',
+      filter: { url: { $eq: url } },
+
     });
+
+    // Ensure the newly created vectors are immediately available
+    // await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for 1 second to ensure indexing is complete
   } else {
-    // console.log('ada vec');
-    return PineconeStore.fromExistingIndex(embeddings, {
+    // console.log('Using existing vector store for URL:', url);
+    vectorStore = await PineconeStore.fromExistingIndex(embeddings, {
       pineconeIndex,
       filter: { url: { $eq: url } },
+      textKey: 'text',
     });
   }
+
+  // Verify that vectors are present
+  // const testQuery = await vectorStore.similaritySearch('test query', 1);
+  // console.log('Test query result:', testQuery);
+
+  return vectorStore;
 };
+
 router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res) => {
 
   const llm = new ChatMistralAI({
@@ -141,6 +164,8 @@ router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res
   const vectorStore = await getOrCreateVectorStore(url, pineconeIndex, embeddings);
 
   const retriever = vectorStore.asRetriever();
+
+  // console.log()
 
   // Contextualize Question Chain
   const contextualizeQSystemPrompt = `Given a chat history and the latest user question
