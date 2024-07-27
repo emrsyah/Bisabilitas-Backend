@@ -29,7 +29,7 @@ const scrapeAndCleanData = async (url: string):  Promise<Document<Record<string,
       async evaluate(page: Page, browser: Browser) {
         const textContent = await page.evaluate(() => {
           const bodyElement = document.querySelector('body');
-          return bodyElement?.textContent ?? '';
+          return bodyElement?.innerText ?? '';
         });
         await browser.close();
         return textContent ?? '';
@@ -39,8 +39,11 @@ const scrapeAndCleanData = async (url: string):  Promise<Document<Record<string,
 
   const docs = await loader.load();
   const pageContent = docs[0].pageContent;
+
   const $ = cheerio.load(pageContent);
+
   $('script, style').remove();
+
   const cleanedText = $('body')
     .html()
     ?.replace(/<style[^>]*>.*<\/style>/gms, '');
@@ -68,6 +71,7 @@ const splitDocuments = async (documents: Document<Record<string, any>>[]) : Prom
   // const transformer = new HtmlToTextTransformer();
   const sequence = splitter.pipe(transformer);
   const split = await sequence.invoke(documents);
+  // console.log('split', split);
   return split;
 };
 
@@ -106,12 +110,14 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
   });
 
   if (existRecords.matches.length === 0) {
+    // console.log('ga ada vec');
     const documents = await scrapeAndCleanData(url);
     const splitted = await splitDocuments(documents);
     return PineconeStore.fromDocuments(splitted, embeddings, {
       pineconeIndex,
     });
   } else {
+    // console.log('ada vec');
     return PineconeStore.fromExistingIndex(embeddings, {
       pineconeIndex,
       filter: { url: { $eq: url } },
