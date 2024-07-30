@@ -172,17 +172,19 @@ const initializeAIComponents = (): AIComponents => {
   let pineconeIndex: any; // Adjust the type according to Pinecone's Index type
   let embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings;
 
+  // console.log(Google)
+
   if (aiProvider === 'GEMINI') {
     embeddings = new GoogleGenerativeAIEmbeddings();
     llm = new ChatGoogleGenerativeAI({
       model: 'gemini-pro',
-      temperature: 0,
+      temperature: 0.4,
     });
     pineconeIndex = pinecone.Index('bisabilitas-768');
   } else {
     llm = new ChatMistralAI({
       model: 'mistral-large-latest',
-      temperature: 0,
+      temperature: 0.4,
     });
     embeddings = new MistralAIEmbeddings();
     pineconeIndex = pinecone.Index('bisabilitas-1024');
@@ -224,31 +226,29 @@ router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res
     .pipe(llm)
     .pipe(new StringOutputParser());
   
-  // const formatInstructions = `Respond only in valid JSON. The JSON object you return should match the following schema:
-  // {{ answer: string, evidence: []string }}
-  
-  // Where answer is your main response, and evidence is a array of string from text of the context you referencing for your response.
-  // `;
 
   const structuredOutputParser = new JsonOutputParser<z.infer<typeof aiResponseSchema>>();
   
   // RAG TEMPLATE
-  const template = `Use the following pieces of context to answer the question at the end.
-  If you don't know the answer, just say that you don't know, don't try to make up an answer.
-  Use four sentences maximum and keep the answer as concise as possible in Markdown Format.
-  Always provide the evidence of the context that you used for your response.
-
-  {context}
-
+  const template = `
+  Use the provided context to answer the question below. Dont fabricate the response. 
+  Keep your response concise, with a maximum of four sentences. Respond in JSON format which would be further explained at the end of this prompt.
+  
+  Context: {context}
+  
   Question: {question}
- 
-  Respond ONLY with a JSON object in the following format, and nothing else:
-  answer: string= the value is string of your main response/answer
-  evidence: []string= the value is an array of string that have the reference text from context which you use to response
+  
+  Respond ONLY with a JSON object in the format below:
+  answer: "string"  // The main answer to the question, derived from the context
+  evidence: ["string1", "string2", ...]  // An array of strings containing the context references used for the answer
 
-  JSON Response:`;
+  JSON Response:
+  `;
+  
 
   const customRagPrompt = PromptTemplate.fromTemplate(template);
+
+  console.log('retriever', await retriever.invoke(question));
 
   const ragChain = RunnableSequence.from([
     RunnablePassthrough.assign({
