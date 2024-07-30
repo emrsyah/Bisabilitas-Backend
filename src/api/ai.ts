@@ -7,7 +7,7 @@ import {
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { ChatMistralAI, MistralAIEmbeddings } from '@langchain/mistralai';
 import { Document } from 'langchain/document';
-import { StringOutputParser } from '@langchain/core/output_parsers';
+import { JsonOutputParser, StringOutputParser, StructuredOutputParser } from '@langchain/core/output_parsers';
 import { HtmlToTextTransformer } from '@langchain/community/document_transformers/html_to_text';
 import * as cheerio from 'cheerio';
 import { ChatPromptTemplate, MessagesPlaceholder, PromptTemplate } from '@langchain/core/prompts';
@@ -16,6 +16,9 @@ import { Index, Pinecone, RecordMetadata } from '@pinecone-database/pinecone';
 import { PineconeStore } from '@langchain/pinecone';
 import { RunnablePassthrough, RunnableSequence } from '@langchain/core/runnables';
 import { formatDocumentsAsString } from 'langchain/util/document';
+import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
+import { z } from 'zod';
+
 
 const router = express.Router();
 
@@ -77,7 +80,6 @@ const splitDocuments = async (documents: Document<Record<string, any>>[]) : Prom
   return split;
 };
 
-
 export interface TypedRequestBody<T> extends Express.Request {
   body: T
 }
@@ -100,8 +102,13 @@ type AiResponse = {
 
 
 
-const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMetadata>, embeddings: MistralAIEmbeddings): Promise<PineconeStore> => {
-  const vectorDimension = 1024;
+const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMetadata>, embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings): Promise<PineconeStore> => {
+  let vectorDimension: number;
+  if (process.env.AI_PROVIDER == 'GEMINI') {
+    vectorDimension = 768;
+  } else {
+    vectorDimension = 1024;
+  }
   const zeroVector = new Array(vectorDimension).fill(0);
 
   const existRecords = await pineconeIndex.query({
@@ -111,7 +118,7 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
     includeMetadata: true,
   });
 
-  console.log(existRecords.matches);
+  // console.log(existRecords.matches);
 
   let vectorStore: PineconeStore;
 
@@ -124,9 +131,8 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
     // Create a new vector store and wait for it to be populated
     vectorStore = await PineconeStore.fromDocuments(splitted, embeddings, {
       pineconeIndex,
-      textKey: 'text',
       filter: { url: { $eq: url } },
-
+      textKey: 'text',
     });
 
     // Ensure the newly created vectors are immediately available
@@ -147,17 +153,51 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
   return vectorStore;
 };
 
-router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res) => {
+interface AIComponents {
+  llm: ChatMistralAI | ChatGoogleGenerativeAI;
+  pineconeIndex: any; // Adjust the type according to Pinecone's Index type
+  embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings;
+}
 
-  const llm = new ChatMistralAI({
-    model: 'mistral-large-latest',
-    temperature: 0,
-  });
+const aiResponseSchema = z.object({
+  answer: z.string().describe('the main response/answer'),
+  evidence: z.array(z.string()).describe('parts of the text from the context used to ground the answer'),
+});
+
+const initializeAIComponents = (): AIComponents => {
+  const aiProvider = process.env.AI_PROVIDER;
 
   const pinecone = new Pinecone();
-  const pineconeIndex = pinecone.Index('bisabilitas-1024');
+  let llm: ChatMistralAI | ChatGoogleGenerativeAI;
+  let pineconeIndex: any; // Adjust the type according to Pinecone's Index type
+  let embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings;
 
-  const embeddings = new MistralAIEmbeddings();
+  if (aiProvider === 'GEMINI') {
+    embeddings = new GoogleGenerativeAIEmbeddings();
+    llm = new ChatGoogleGenerativeAI({
+      model: 'gemini-pro',
+      temperature: 0,
+    });
+    pineconeIndex = pinecone.Index('bisabilitas-768');
+  } else {
+    llm = new ChatMistralAI({
+      model: 'mistral-large-latest',
+      temperature: 0,
+    });
+    embeddings = new MistralAIEmbeddings();
+    pineconeIndex = pinecone.Index('bisabilitas-1024');
+  }
+  // llm = llm.withStructuredOutput();
+  return { llm, pineconeIndex, embeddings };
+};
+
+
+router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res) => {
+
+  const { llm, embeddings, pineconeIndex } = initializeAIComponents();
+
+  // const structuredLLM = llm.withStructuredOutput(aiResponseSchema);
+
 
   const { url, history, question } = req.body;
 
@@ -179,21 +219,34 @@ router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res
     ['human', '{question}'],
   ]);
 
+  
   const contextualizeQChain = contextualizeQPrompt
     .pipe(llm)
     .pipe(new StringOutputParser());
+  
+  // const formatInstructions = `Respond only in valid JSON. The JSON object you return should match the following schema:
+  // {{ answer: string, evidence: []string }}
+  
+  // Where answer is your main response, and evidence is a array of string from text of the context you referencing for your response.
+  // `;
 
+  const structuredOutputParser = new JsonOutputParser<z.infer<typeof aiResponseSchema>>();
+  
   // RAG TEMPLATE
   const template = `Use the following pieces of context to answer the question at the end.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-Use four sentences maximum and keep the answer as concise as possible.
-Always provide the evidence of the context that you used for your response.
+  If you don't know the answer, just say that you don't know, don't try to make up an answer.
+  Use four sentences maximum and keep the answer as concise as possible in Markdown Format.
+  Always provide the evidence of the context that you used for your response.
 
-{context}
+  {context}
 
-Question: {question}
+  Question: {question}
+ 
+  Respond ONLY with a JSON object in the following format, and nothing else:
+  answer: string= the value is string of your main response/answer
+  evidence: []string= the value is an array of string that have the reference text from context which you use to response
 
-Helpful Answer:`;
+  JSON Response:`;
 
   const customRagPrompt = PromptTemplate.fromTemplate(template);
 
@@ -208,22 +261,24 @@ Helpful Answer:`;
     }),
     customRagPrompt,
     llm,
-    new StringOutputParser(),
+    structuredOutputParser,
   ]);
 
+  
   const result = await ragChain.invoke({
     question,
     chat_history: history,
   });
+  console.log('resss', result);
 
   const updatedHistory: ChatMessage[] = [
     ...history,
     { role: 'user', content: question },
-    { role: 'assistant', content: result },
+    { role: 'assistant', content: result.answer },
   ];
 
   res.json({
-    answer: result,
+    answer: result.answer,
     history: updatedHistory,
   });
 
