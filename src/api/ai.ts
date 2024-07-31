@@ -7,7 +7,7 @@ import {
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { ChatMistralAI, MistralAIEmbeddings } from '@langchain/mistralai';
 import { Document } from 'langchain/document';
-import { JsonOutputParser, StringOutputParser, StructuredOutputParser } from '@langchain/core/output_parsers';
+import { JsonOutputParser, StringOutputParser } from '@langchain/core/output_parsers';
 import { HtmlToTextTransformer } from '@langchain/community/document_transformers/html_to_text';
 import * as cheerio from 'cheerio';
 import { ChatPromptTemplate, MessagesPlaceholder, PromptTemplate } from '@langchain/core/prompts';
@@ -18,6 +18,7 @@ import { RunnablePassthrough, RunnableSequence } from '@langchain/core/runnables
 import { formatDocumentsAsString } from 'langchain/util/document';
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { z } from 'zod';
+import { AIMessage, HumanMessage } from '@langchain/core/messages';
 
 
 const router = express.Router();
@@ -85,8 +86,9 @@ export interface TypedRequestBody<T> extends Express.Request {
 }
 
 interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'ai';
   content: string;
+  evidence: string[];
 }
 
 interface AiRequestBody {
@@ -95,8 +97,13 @@ interface AiRequestBody {
   history: ChatMessage[];
 }
 
-type AiResponse = {
+interface Answer {
   answer: string;
+  evidence: string[]
+}
+
+type AiResponse = {
+  answer: Answer;
   history: ChatMessage[];  
 };
 
@@ -177,7 +184,7 @@ const initializeAIComponents = (): AIComponents => {
   if (aiProvider === 'GEMINI') {
     embeddings = new GoogleGenerativeAIEmbeddings();
     llm = new ChatGoogleGenerativeAI({
-      model: 'gemini-pro',
+      model: 'gemini-1.5-flash',
       temperature: 0.4,
     });
     pineconeIndex = pinecone.Index('bisabilitas-768');
@@ -194,7 +201,7 @@ const initializeAIComponents = (): AIComponents => {
 };
 
 
-router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res) => {
+router.post<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res) => {
 
   const { llm, embeddings, pineconeIndex } = initializeAIComponents();
 
@@ -231,8 +238,9 @@ router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res
   
   // RAG TEMPLATE
   const template = `
+  You are a chrome extension assistant, your role is to help answering people question.
   Use the provided context to answer the question below. Dont fabricate the response. 
-  Keep your response concise, with a maximum of four sentences. Respond in JSON format which would be further explained at the end of this prompt.
+  Keep your response concise, with a maximum of four sentences. Respond in JSON format which would be further explained at the end of this prompt. The maximum evidence you provide is 3 evidence
   
   Context: {context}
   
@@ -240,7 +248,9 @@ router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res
   
   Respond ONLY with a JSON object in the format below:
   answer: "string"  // The main answer to the question, derived from the context
-  evidence: ["string1", "string2", ...]  // An array of strings containing the context references used for the answer
+  evidence: ["string1", "string2", ...]  // An array of strings containing the context references used for the answer, the maximum word for each evidence should only be 4 words only and it must a copy-paste text from the context.
+
+
 
   JSON Response:
   `;
@@ -248,7 +258,7 @@ router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res
 
   const customRagPrompt = PromptTemplate.fromTemplate(template);
 
-  console.log('retriever', await retriever.invoke(question));
+  // console.log('retriever', await retriever.invoke(question));
 
   const ragChain = RunnableSequence.from([
     RunnablePassthrough.assign({
@@ -264,21 +274,31 @@ router.get<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res
     structuredOutputParser,
   ]);
 
+  const transformedHistory = history.map((h) => {
+    if (h.role == 'ai') {
+      return new AIMessage(h.content);
+    } else {
+      return new HumanMessage(h.content);
+    }
+  });
   
   const result = await ragChain.invoke({
     question,
-    chat_history: history,
+    chat_history: transformedHistory,
   });
-  console.log('resss', result);
+  // console.log('resss', result);
 
   const updatedHistory: ChatMessage[] = [
     ...history,
-    { role: 'user', content: question },
-    { role: 'assistant', content: result.answer },
+    { role: 'user', content: question, evidence: [] },
+    { role: 'ai', content: result.answer, evidence: result.evidence },
   ];
 
   res.json({
-    answer: result.answer,
+    answer: {
+      answer: result.answer,
+      evidence: result.evidence,
+    },
     history: updatedHistory,
   });
 
