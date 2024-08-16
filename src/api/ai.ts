@@ -19,10 +19,126 @@ import { formatDocumentsAsString } from 'langchain/util/document';
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { z } from 'zod';
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
+import { ChatOpenAI, OpenAIEmbeddings } from '@langchain/openai';
 
 
 const router = express.Router();
 
+interface SemanticElement {
+  type: string;
+  content: string;
+  children: SemanticElement[];
+  attributes: Record<string, string>;
+}
+
+const scrapeAndCleanDataWStructure = async (url: string): Promise<Document<Record<string, any>>[]> => {
+  const loader = new PuppeteerWebBaseLoader(
+    url,
+    {
+      launchOptions: {
+        headless: 'new',
+      },
+      async evaluate(page: Page, browser: Browser) {
+        const htmlContent = await page.content();
+        await browser.close();
+        return htmlContent;
+      },
+    },
+  );
+
+  const docs = await loader.load();
+  const htmlContent = docs[0].pageContent;
+
+  const $ = cheerio.load(htmlContent);
+
+  // Remove script and style tags
+  $('script, style').remove();
+
+  const extractSemantics = (element: cheerio.Element): SemanticElement => {
+    const tag = element.name;
+    const attributes: Record<string, string> = {};
+    
+    if ('attribs' in element) {
+      Object.entries(element.attribs).forEach(([key, value]) => {
+        if (key === 'href' || key === 'src' || key === 'id' || key === 'role') {
+          attributes[key] = value;
+        }
+      });
+    }
+
+    const children: SemanticElement[] = [];
+    let content = '';
+
+    $(element).contents().each((_, el) => {
+      if (el.type === 'text') {
+        const text = $(el).text().trim();
+        if (text) {
+          content += text + ' ';
+        }
+      } else if (el.type === 'tag') {
+        children.push(extractSemantics(el));
+      }
+    });
+
+    // Determine the semantic type based on the tag and attributes
+    let type = tag;
+    if (tag === 'nav' || attributes.role === 'navigation') {
+      type = 'navigation';
+    } else if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag)) {
+      type = 'heading';
+    } else if (tag === 'a') {
+      type = 'link';
+    } else if (tag === 'main') {
+      type = 'main_content';
+    } else if (tag === 'article' || tag === 'section') {
+      type = 'content_section';
+    } else if (tag === 'aside') {
+      type = 'sidebar';
+    } else if (tag === 'footer') {
+      type = 'footer';
+    }
+
+    return { type, content: content.trim(), children, attributes };
+  };
+
+  const root = extractSemantics($('body')[0]);
+
+  const semanticToString = (node: SemanticElement, depth: number = 0): string => {
+    const indent = '  '.repeat(depth);
+    let result = `${indent}${node.type}`;
+
+    if (Object.keys(node.attributes).length > 0) {
+      const attrs = Object.entries(node.attributes)
+        .map(([key, value]) => `${key}="${value}"`)
+        .join(' ');
+      result += ` (${attrs})`;
+    }
+
+    if (node.content) {
+      result += `: ${node.content.substring(0, 100)}${node.content.length > 100 ? '...' : ''}`;
+    }
+
+    result += '\n';
+
+    for (const child of node.children) {
+      result += semanticToString(child, depth + 1);
+    }
+
+    return result;
+  };
+
+  const semanticStructure = semanticToString(root);
+
+  const document = new Document({
+    pageContent: semanticStructure,
+    metadata: {
+      url: url,
+      contentType: 'text/plain',
+    },
+  });
+
+  return [document];
+};
 const scrapeAndCleanData = async (url: string):  Promise<Document<Record<string, any>>[]> => {
   const loader = new PuppeteerWebBaseLoader(
     url,
@@ -109,12 +225,14 @@ type AiResponse = {
 
 
 
-const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMetadata>, embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings): Promise<PineconeStore> => {
+const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMetadata>, embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings | OpenAIEmbeddings): Promise<PineconeStore> => {
   let vectorDimension: number;
   if (process.env.AI_PROVIDER == 'GEMINI') {
     vectorDimension = 768;
-  } else {
+  } else if (process.env.AI_PROVIDER == 'MISTRAL') {
     vectorDimension = 1024;
+  } else {
+    vectorDimension = 1536;
   }
   const zeroVector = new Array(vectorDimension).fill(0);
 
@@ -161,9 +279,9 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
 };
 
 interface AIComponents {
-  llm: ChatMistralAI | ChatGoogleGenerativeAI;
+  llm: ChatMistralAI | ChatGoogleGenerativeAI | ChatOpenAI;
   pineconeIndex: any; // Adjust the type according to Pinecone's Index type
-  embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings;
+  embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings | OpenAIEmbeddings;
 }
 
 const aiResponseSchema = z.object({
@@ -175,9 +293,10 @@ const initializeAIComponents = (): AIComponents => {
   const aiProvider = process.env.AI_PROVIDER;
 
   const pinecone = new Pinecone();
-  let llm: ChatMistralAI | ChatGoogleGenerativeAI;
+  let llm: ChatMistralAI | ChatGoogleGenerativeAI | ChatOpenAI;
   let pineconeIndex: any; // Adjust the type according to Pinecone's Index type
-  let embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings;
+  let embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings | OpenAIEmbeddings;
+  
 
   // console.log(Google)
 
@@ -188,13 +307,20 @@ const initializeAIComponents = (): AIComponents => {
       temperature: 0.4,
     });
     pineconeIndex = pinecone.Index('bisabilitas-768');
-  } else {
+  } else if (aiProvider === 'MISTRAL') {
     llm = new ChatMistralAI({
       model: 'mistral-large-latest',
       temperature: 0.4,
     });
     embeddings = new MistralAIEmbeddings();
     pineconeIndex = pinecone.Index('bisabilitas-1024');
+  } else {
+    llm = new ChatOpenAI({
+      model: 'gpt-4o-mini',
+      temperature: 0.4,
+    });
+    embeddings = new OpenAIEmbeddings();
+    pineconeIndex = pinecone.Index('bisabilitas-1536');
   }
   // llm = llm.withStructuredOutput();
   return { llm, pineconeIndex, embeddings };
@@ -302,6 +428,13 @@ router.post<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, re
     history: updatedHistory,
   });
 
+});
+
+router.post<{}, {}>('/test', async (req: TypedRequestBody<AiRequestBody>, res) => {
+  const { url } = req.body;
+  const docs = await scrapeAndCleanDataWStructure(url);
+  console.log(docs);
+  res.json({ docs: docs[0].pageContent });
 });
 
 export default router;

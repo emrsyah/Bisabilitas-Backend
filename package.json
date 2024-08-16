@@ -24,6 +24,7 @@
     "@langchain/core": "^0.2.18",
     "@langchain/google-genai": "^0.0.23",
     "@langchain/mistralai": "^0.0.26",
+    "@langchain/openai": "^0.2.6",
     "@langchain/pinecone": "^0.0.8",
     "@mistralai/mistralai": "^0.5.0",
     "@mozilla/readability": "^0.5.0",
