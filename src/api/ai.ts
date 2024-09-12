@@ -7,20 +7,44 @@ import {
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { ChatMistralAI, MistralAIEmbeddings } from '@langchain/mistralai';
 import { Document } from 'langchain/document';
-import { JsonOutputParser, StringOutputParser } from '@langchain/core/output_parsers';
+import {
+  JsonOutputParser,
+  StringOutputParser,
+} from '@langchain/core/output_parsers';
 import { HtmlToTextTransformer } from '@langchain/community/document_transformers/html_to_text';
 import * as cheerio from 'cheerio';
-import { ChatPromptTemplate, MessagesPlaceholder, PromptTemplate } from '@langchain/core/prompts';
+import {
+  ChatPromptTemplate,
+  MessagesPlaceholder,
+  PromptTemplate,
+} from '@langchain/core/prompts';
 import { DocumentInterface } from '@langchain/core/documents';
 import { Index, Pinecone, RecordMetadata } from '@pinecone-database/pinecone';
 import { PineconeStore } from '@langchain/pinecone';
-import { RunnablePassthrough, RunnableSequence } from '@langchain/core/runnables';
+import {
+  RunnablePassthrough,
+  RunnableSequence,
+} from '@langchain/core/runnables';
 import { formatDocumentsAsString } from 'langchain/util/document';
-import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
+import {
+  ChatGoogleGenerativeAI,
+  GoogleGenerativeAIEmbeddings,
+} from '@langchain/google-genai';
 import { z } from 'zod';
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
 import { ChatOpenAI, OpenAIEmbeddings } from '@langchain/openai';
 import { CohereRerank } from '@langchain/cohere';
+import { downloadMedia } from '../utils/mediaDownloader';
+import fs from 'fs';
+import {
+  transcribeAudio,
+  transcribeNonStaticAudio,
+} from '../services/transcribeAudio';
+import AxePuppeteer from '@axe-core/puppeteer';
+// import axe from 'ax'
+import puppeteer from 'puppeteer';
+import { generateAltText } from '../services/generateAltText';
+import { generateAIImprovement } from '../services/generateAIImprovement';
 
 
 const router = express.Router();
@@ -32,31 +56,34 @@ interface SemanticElement {
   attributes: Record<string, string>;
 }
 
-const scrapeAndCleanData2 = async (url: string): Promise<Document<Record<string, any>>[]> => {
-  const loader = new PuppeteerWebBaseLoader(
-    url,
-    {
-      launchOptions: {
-        headless: 'new',
-      },
-      async evaluate(page: Page, browser: Browser): Promise<string> {
-        const result = await page.evaluate(() => {
-          const sections = Array.from(document.body.querySelectorAll('h1, h2, h3, h4, h5, h6, p'));
-          return JSON.stringify(sections.map(section => ({
+const scrapeAndCleanData2 = async (
+  url: string,
+): Promise<Document<Record<string, any>>[]> => {
+  const loader = new PuppeteerWebBaseLoader(url, {
+    launchOptions: {
+      headless: 'new',
+    },
+    async evaluate(page: Page, browser: Browser): Promise<string> {
+      const result = await page.evaluate(() => {
+        const sections = Array.from(
+          document.body.querySelectorAll('h1, h2, h3, h4, h5, h6, p'),
+        );
+        return JSON.stringify(
+          sections.map((section) => ({
             tagName: section.tagName.toLowerCase(),
             textContent: section.textContent,
             id: section.id,
             className: section.className,
-          })));
-        });
-        await browser.close();
-        return result;
-      },
+          })),
+        );
+      });
+      await browser.close();
+      return result;
     },
-  );
+  });
 
   const rawData = await loader.load();
-  
+
   let documents: Document<Record<string, any>>[] = [];
   let currentSection = '';
   let currentContent = '';
@@ -94,7 +121,8 @@ const scrapeAndCleanData2 = async (url: string): Promise<Document<Record<string,
           url: url,
           section: currentSection,
           sectionId: parsedContent[parsedContent.length - 1]?.id || '',
-          sectionClass: parsedContent[parsedContent.length - 1]?.className || '',
+          sectionClass:
+            parsedContent[parsedContent.length - 1]?.className || '',
         },
       }),
     );
@@ -103,20 +131,19 @@ const scrapeAndCleanData2 = async (url: string): Promise<Document<Record<string,
   return documents;
 };
 
-const scrapeAndCleanDataWStructure = async (url: string): Promise<Document<Record<string, any>>[]> => {
-  const loader = new PuppeteerWebBaseLoader(
-    url,
-    {
-      launchOptions: {
-        headless: 'new',
-      },
-      async evaluate(page: Page, browser: Browser) {
-        const htmlContent = await page.content();
-        await browser.close();
-        return htmlContent;
-      },
+const scrapeAndCleanDataWStructure = async (
+  url: string,
+): Promise<Document<Record<string, any>>[]> => {
+  const loader = new PuppeteerWebBaseLoader(url, {
+    launchOptions: {
+      headless: 'new',
     },
-  );
+    async evaluate(page: Page, browser: Browser) {
+      const htmlContent = await page.content();
+      await browser.close();
+      return htmlContent;
+    },
+  });
 
   const docs = await loader.load();
   const htmlContent = docs[0].pageContent;
@@ -129,7 +156,7 @@ const scrapeAndCleanDataWStructure = async (url: string): Promise<Document<Recor
   const extractSemantics = (element: cheerio.Element): SemanticElement => {
     const tag = element.name;
     const attributes: Record<string, string> = {};
-    
+
     if ('attribs' in element) {
       Object.entries(element.attribs).forEach(([key, value]) => {
         if (key === 'href' || key === 'src' || key === 'id' || key === 'role') {
@@ -141,16 +168,18 @@ const scrapeAndCleanDataWStructure = async (url: string): Promise<Document<Recor
     const children: SemanticElement[] = [];
     let content = '';
 
-    $(element).contents().each((_, el) => {
-      if (el.type === 'text') {
-        const text = $(el).text().trim();
-        if (text) {
-          content += text + ' ';
+    $(element)
+      .contents()
+      .each((_, el) => {
+        if (el.type === 'text') {
+          const text = $(el).text().trim();
+          if (text) {
+            content += text + ' ';
+          }
+        } else if (el.type === 'tag') {
+          children.push(extractSemantics(el));
         }
-      } else if (el.type === 'tag') {
-        children.push(extractSemantics(el));
-      }
-    });
+      });
 
     // Determine the semantic type based on the tag and attributes
     let type = tag;
@@ -175,7 +204,10 @@ const scrapeAndCleanDataWStructure = async (url: string): Promise<Document<Recor
 
   const root = extractSemantics($('body')[0]);
 
-  const semanticToString = (node: SemanticElement, depth: number = 0): string => {
+  const semanticToString = (
+    node: SemanticElement,
+    depth: number = 0,
+  ): string => {
     const indent = '  '.repeat(depth);
     let result = `${indent}${node.type}`;
 
@@ -187,7 +219,9 @@ const scrapeAndCleanDataWStructure = async (url: string): Promise<Document<Recor
     }
 
     if (node.content) {
-      result += `: ${node.content.substring(0, 100)}${node.content.length > 100 ? '...' : ''}`;
+      result += `: ${node.content.substring(0, 100)}${
+        node.content.length > 100 ? '...' : ''
+      }`;
     }
 
     result += '\n';
@@ -212,7 +246,9 @@ const scrapeAndCleanDataWStructure = async (url: string): Promise<Document<Recor
   return [document];
 };
 
-const scrapeAndCleanData = async (url: string): Promise<Document<Record<string, any>>[]> => {
+const scrapeAndCleanData = async (
+  url: string,
+): Promise<Document<Record<string, any>>[]> => {
   const loader = new PuppeteerWebBaseLoader(url, {
     launchOptions: {
       headless: 'new',
@@ -254,12 +290,89 @@ const scrapeAndCleanData = async (url: string): Promise<Document<Record<string, 
   // Remove non-printable characters
   const docsC = textContent.replace(/[^\x20-\x7E]+/g, ' ').trim();
 
-  const documents = [new Document({ pageContent: docsC, metadata: { url: url } })];
+  const docsCNoEmptyLines = docsC.replace(/^\s*[\r\n]/gm, '');
+
+  const documents = [
+    new Document({ pageContent: docsCNoEmptyLines, metadata: { url: url } }),
+  ];
   return documents;
 };
 
+const scrapeForAnalyzer = async (url: string) => {
+  let screenshot;
+  const loader = new PuppeteerWebBaseLoader(url, {
+    launchOptions: { headless: 'new' },
+    async evaluate(page) {
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      screenshot = await page.screenshot({
+        fullPage: true,
+        path: 'screenshot.png',
+      });
+      const content = await page.content();
+      return content;
+    },
+  });
 
-const splitDocuments = async (documents: Document<Record<string, any>>[]) : Promise<DocumentInterface<Record<string, any>>[]>  => {
+  const documents = await loader.load();
+  const pageContent = documents[0].pageContent;
+  const $ = cheerio.load(pageContent);
+
+  $('script, style').remove(); // Remove elements that are not needed
+
+  const buttons = $(
+    'button, input[type="button"], input[type="submit"], .button, .btn',
+  )
+    .map((i, el) => ({
+      text: $(el).text().trim(),
+      classes: $(el).attr('class')?.split(/\s+/).slice(0, 3).join(' '), // Collect up to the first three class names
+      role: $(el).attr('role'),
+    }))
+    .get();
+
+  const links = $('a')
+    .map((i, el) => ({
+      href: $(el).attr('href'),
+      text: $(el).text().trim() || $(el).attr('aria-label') || '',
+      classes: $(el).attr('class')?.split(/\s+/).slice(0, 3).join(' '),
+    }))
+    .get();
+
+  const inputs = $('input, select, textarea')
+    .map((i, el) => ({
+      type: $(el).attr('type') || $(el).prop('nodeName').toLowerCase(),
+      placeholder: $(el).attr('placeholder'),
+      ariaLabel: $(el).attr('aria-label'),
+      classes: $(el).attr('class')?.split(/\s+/).slice(0, 3).join(' '),
+    }))
+    .get();
+
+  const headings = $('h1, h2, h3, h4, h5, h6')
+    .map((i, el) => ({
+      text: $(el).text().trim(),
+      level: $(el).prop('nodeName'),
+    }))
+    .get();
+
+  const roles = $('[role]')
+    .map((i, el) => ({
+      role: $(el).attr('role'),
+      description: $(el).text().trim() || $(el).attr('aria-label'),
+    }))
+    .get();
+
+  return {
+    buttons,
+    links,
+    inputs,
+    headings,
+    roles,
+    // screenshot,
+  };
+};
+
+const splitDocuments = async (
+  documents: Document<Record<string, any>>[],
+): Promise<DocumentInterface<Record<string, any>>[]> => {
   const transformer = new HtmlToTextTransformer();
   // const transformer2 = new MozillaReadabilityTransformer();
 
@@ -276,7 +389,7 @@ const splitDocuments = async (documents: Document<Record<string, any>>[]) : Prom
 };
 
 export interface TypedRequestBody<T> extends Express.Request {
-  body: T
+  body: T;
 }
 
 interface ChatMessage {
@@ -293,17 +406,22 @@ interface AiRequestBody {
 
 interface Answer {
   answer: string;
-  evidence: string[]
+  evidence: string[];
 }
 
 type AiResponse = {
   answer: Answer;
-  history: ChatMessage[];  
+  history: ChatMessage[];
 };
 
-
-
-const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMetadata>, embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings | OpenAIEmbeddings): Promise<PineconeStore> => {
+const getOrCreateVectorStore = async (
+  url: string,
+  pineconeIndex: Index<RecordMetadata>,
+  embeddings:
+  | MistralAIEmbeddings
+  | GoogleGenerativeAIEmbeddings
+  | OpenAIEmbeddings,
+): Promise<PineconeStore> => {
   let vectorDimension: number;
   if (process.env.AI_PROVIDER == 'GEMINI') {
     vectorDimension = 768;
@@ -329,7 +447,8 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
     // console.log('Creating new vector store for URL:', url);
     const documents = await scrapeAndCleanData(url);
     const splitted = await splitDocuments(documents);
-    // console.log('Splitted documents:', splitted);
+    console.log('Documents:', documents);
+    console.log('Splitted documents:', splitted);
 
     // Create a new vector store and wait for it to be populated
     vectorStore = await PineconeStore.fromDocuments(splitted, embeddings, {
@@ -359,13 +478,18 @@ const getOrCreateVectorStore = async (url: string, pineconeIndex: Index<RecordMe
 interface AIComponents {
   llm: ChatMistralAI | ChatGoogleGenerativeAI | ChatOpenAI;
   pineconeIndex: any; // Adjust the type according to Pinecone's Index type
-  embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings | OpenAIEmbeddings;
+  embeddings:
+  | MistralAIEmbeddings
+  | GoogleGenerativeAIEmbeddings
+  | OpenAIEmbeddings;
   reranker: CohereRerank;
 }
 
 const aiResponseSchema = z.object({
   answer: z.string().describe('the main response/answer'),
-  evidence: z.array(z.string()).describe('parts of the text from the context used to ground the answer'),
+  evidence: z
+    .array(z.string())
+    .describe('parts of the text from the context used to ground the answer'),
 });
 
 const initializeAIComponents = (): AIComponents => {
@@ -374,13 +498,16 @@ const initializeAIComponents = (): AIComponents => {
   const pinecone = new Pinecone();
   let llm: ChatMistralAI | ChatGoogleGenerativeAI | ChatOpenAI;
   let pineconeIndex: any; // Adjust the type according to Pinecone's Index type
-  let embeddings: MistralAIEmbeddings | GoogleGenerativeAIEmbeddings | OpenAIEmbeddings;
+  let embeddings:
+  | MistralAIEmbeddings
+  | GoogleGenerativeAIEmbeddings
+  | OpenAIEmbeddings;
 
   const reranker = new CohereRerank({
     model: 'rerank-multilingual-v3.0',
     topN: 5,
   });
-  
+
   // console.log(Google)
 
   if (aiProvider === 'GEMINI') {
@@ -409,38 +536,46 @@ const initializeAIComponents = (): AIComponents => {
   return { llm, pineconeIndex, embeddings, reranker };
 };
 
+router.post<{}, AiResponse>(
+  '/',
+  async (req: TypedRequestBody<AiRequestBody>, res) => {
+    const { llm, embeddings, pineconeIndex, reranker } =
+      initializeAIComponents();
 
-router.post<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, res) => {
-  const { llm, embeddings, pineconeIndex, reranker } = initializeAIComponents();
+    // const structuredLLM = llm.withStructuredOutput(aiResponseSchema);
 
-  // const structuredLLM = llm.withStructuredOutput(aiResponseSchema);
+    const { url, history, question } = req.body;
 
-  const { url, history, question } = req.body;
+    const vectorStore = await getOrCreateVectorStore(
+      url,
+      pineconeIndex,
+      embeddings,
+    );
 
-  const vectorStore = await getOrCreateVectorStore(url, pineconeIndex, embeddings);
+    const retriever = vectorStore.asRetriever();
 
-  const retriever = vectorStore.asRetriever();
-
-  // Contextualize Question Chain
-  const contextualizeQSystemPrompt = `Given a chat history and the latest user question
+    // Contextualize Question Chain
+    const contextualizeQSystemPrompt = `Given a chat history and the latest user question
   which might reference context in the chat history, formulate a standalone question
   which can be understood without the chat history. Do NOT answer the question,
   just reformulate it if needed and otherwise return it as is.`;
 
-  const contextualizeQPrompt = ChatPromptTemplate.fromMessages([
-    ['system', contextualizeQSystemPrompt],
-    new MessagesPlaceholder('chat_history'),
-    ['human', '{question}'],
-  ]);
-  
-  const contextualizeQChain = contextualizeQPrompt
-    .pipe(llm)
-    .pipe(new StringOutputParser());
-  
-  const structuredOutputParser = new JsonOutputParser<z.infer<typeof aiResponseSchema>>();
-  
-  // RAG TEMPLATE
-  const template = `
+    const contextualizeQPrompt = ChatPromptTemplate.fromMessages([
+      ['system', contextualizeQSystemPrompt],
+      new MessagesPlaceholder('chat_history'),
+      ['human', '{question}'],
+    ]);
+
+    const contextualizeQChain = contextualizeQPrompt
+      .pipe(llm)
+      .pipe(new StringOutputParser());
+
+    const structuredOutputParser = new JsonOutputParser<
+    z.infer<typeof aiResponseSchema>
+    >();
+
+    // RAG TEMPLATE
+    const template = `
   You are a chrome extension assistant, your role is to help answering people question.
   Use the provided context to answer the question below. Dont fabricate the response. 
   Keep your response concise, with a maximum of four sentences. Respond in JSON format which would be further explained at the end of this prompt. The maximum evidence you provide is 3 evidence
@@ -455,85 +590,515 @@ router.post<{}, AiResponse>('/', async (req: TypedRequestBody<AiRequestBody>, re
 
   JSON Response:
   `;
-  
-  const customRagPrompt = PromptTemplate.fromTemplate(template);
 
-  // console.log('retriever', await retriever.invoke(question));
+    const customRagPrompt = PromptTemplate.fromTemplate(template);
 
-  const ragChain = RunnableSequence.from([
-    RunnablePassthrough.assign({
-      context: async (input: Record<string, unknown>) => {
-        // if (input.chat_history && (input.chat_history as any[]).length > 0) {
-        //   return contextualizeQChain.pipe(retriever).pipe(formatDocumentsAsString).invoke(input);
-        // }
-        // return retriever.invoke(input.question as string).then(formatDocumentsAsString);
+    // console.log('retriever', await retriever.invoke(question));
 
-        // ================== START ==================
-        let docs;
-        if (input.chat_history && (input.chat_history as any[]).length > 0) {
-          const contextualizedQ = await contextualizeQChain.invoke(input);
-          docs = await retriever.invoke(contextualizedQ);
-        } else {
-          docs = await retriever.invoke(input.question as string);
-        }
-        
-        // Apply Cohere Rerank
-        const rerankedDocs = await reranker.rerank(docs, input.question as string, {
-          topN: 5,
-        });
-        
-        // Sort the reranked documents by relevance score
-        const sortedDocs = rerankedDocs
-          .sort((a, b) => b.relevanceScore - a.relevanceScore)
-          .map(item => docs[item.index]);
+    const ragChain = RunnableSequence.from([
+      RunnablePassthrough.assign({
+        context: async (input: Record<string, unknown>) => {
+          // if (input.chat_history && (input.chat_history as any[]).length > 0) {
+          //   return contextualizeQChain.pipe(retriever).pipe(formatDocumentsAsString).invoke(input);
+          // }
+          // return retriever.invoke(input.question as string).then(formatDocumentsAsString);
 
-        console.log(sortedDocs);
-        
-        return formatDocumentsAsString(sortedDocs);
+          // ================== START ==================
+          let docs;
+          if (input.chat_history && (input.chat_history as any[]).length > 0) {
+            const contextualizedQ = await contextualizeQChain.invoke(input);
+            docs = await retriever.invoke(contextualizedQ);
+          } else {
+            docs = await retriever.invoke(input.question as string);
+          }
 
-        // ================== ENDED ==================
+          console.log(docs);
+
+          // Apply Cohere Rerank
+          const rerankedDocs = await reranker.rerank(
+            docs,
+            input.question as string,
+            {
+              topN: 5,
+            },
+          );
+
+          // console.log(rerankedDocs);
+
+          // Sort the reranked documents by relevance score
+          const sortedDocs = rerankedDocs
+            .sort((a, b) => b.relevanceScore - a.relevanceScore)
+            .map((item) => docs[item.index]);
+
+          // console.log(sortedDocs);
+
+          return formatDocumentsAsString(sortedDocs);
+
+          // ================== ENDED ==================
+        },
+      }),
+      customRagPrompt,
+      llm,
+      structuredOutputParser,
+    ]);
+
+    const transformedHistory = history.map((h) => {
+      if (h.role == 'ai') {
+        return new AIMessage(h.content);
+      } else {
+        return new HumanMessage(h.content);
+      }
+    });
+
+    const result = await ragChain.invoke({
+      question,
+      chat_history: transformedHistory,
+    });
+
+    const updatedHistory: ChatMessage[] = [
+      ...history,
+      { role: 'user', content: question, evidence: [] },
+      { role: 'ai', content: result.answer, evidence: result.evidence },
+    ];
+
+    res.json({
+      answer: {
+        answer: result.answer,
+        evidence: result.evidence,
       },
-    }),
-    customRagPrompt,
-    llm,
-    structuredOutputParser,
-  ]);
+      history: updatedHistory,
+    });
+  },
+);
 
-  const transformedHistory = history.map((h) => {
-    if (h.role == 'ai') {
-      return new AIMessage(h.content);
-    } else {
-      return new HumanMessage(h.content);
+router.post<{}, {}>(
+  '/test',
+  async (req: TypedRequestBody<AiRequestBody>, res) => {
+    const { url } = req.body;
+    const docs = await scrapeAndCleanData(url);
+    console.log(docs);
+    console.log(docs.length);
+    res.json({ docs: docs[0].pageContent });
+  },
+);
+
+router.post<{}, {}>(
+  '/analyze',
+  async (req: TypedRequestBody<AiRequestBody>, res) => {
+    const { url } = req.body;
+    const docs = await scrapeForAnalyzer(url);
+
+    const accessibilityTemplate = `
+You are an AI trained to enhance web accessibility. Given the content of a webpage divided into sections like headers, buttons, links, and inputs, your task is to evaluate and suggest improvements for web navigation and screen reader compatibility.
+
+Context:
+- Headers: {headersJson}
+- Buttons: {buttonsJson}
+- Links: {linksJson}
+- Inputs: {inputsJson}
+
+Question: What improvements can be made to enhance accessibility for keyboard navigation and screen reader users for the given webpage elements?
+
+Respond ONLY with a JSON object in the format below:
+- navigationEnhancements: [{
+    element: "string", // e.g., "header", "button"
+    current: "string", // current state or description
+    recommendation: "string" // what should be changed or enhanced
+  }]
+- screenReaderEnhancements: [{
+    element: "string",
+    current: "string",
+    recommendation: "string"
+  }]
+
+JSON Response:
+`;
+
+    const adjustedRagPrompt = PromptTemplate.fromTemplate(
+      accessibilityTemplate,
+    );
+
+    console.log(docs);
+
+    res.json({ docs: docs });
+  },
+);
+
+router.post<{}, {}>('/transcribe', async (req, res) => {
+  let localFilePath: string | null = null;
+  try {
+    const { mediaUrl } = req.body;
+
+    if (!mediaUrl) {
+      return res.status(400).json({ error: 'Media URL is required' });
     }
+
+    localFilePath = await downloadMedia(mediaUrl);
+    const transcript = await transcribeAudio(localFilePath);
+
+    res.json({ transcript });
+  } catch (error) {
+    console.error('Transcription error:', error);
+    res.status(500).json({ error: 'An error occurred during transcription' });
+  } finally {
+    // Clean up the temporary file
+    if (localFilePath && fs.existsSync(localFilePath)) {
+      fs.unlinkSync(localFilePath);
+    }
+  }
+});
+
+router.post<{}, {}>('/transcribe-audio', async (req, res) => {
+  try {
+    const bodyData = JSON.parse(req.body);
+    const base64Audio = bodyData.audioData;
+
+    const audioBuffer = Buffer.from(base64Audio, 'base64');
+
+    // Use OpenAI API to transcribe the audio
+    const transcription = transcribeNonStaticAudio(audioBuffer);
+
+    // Send the transcription text as response
+    res.json({ transcription: transcription });
+  } catch (error) {
+    console.error('Error during transcription:', error);
+    res.status(500).send('Error during transcription');
+  }
+});
+
+
+router.post<{}, {}>('/improve-accessibility', async (req, res) => {
+  try {
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+    // const puppeteer = new Puppeteer();
+    const browser = await puppeteer.launch({ headless: 'new' });
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle0' });
+
+    // Perform accessibility analysis
+    const axeResults = await new AxePuppeteer(page)
+      .withRules([
+        'color-contrast',
+        'image-alt',
+        'aria-required-attr',
+        'link-name',
+        'button-name',
+        'label',
+        // 'html-has-lang',
+      ])
+      .analyze();
+
+    // Get the page content
+    const content = await page.content();
+
+    await browser.close();
+
+    const $ = cheerio.load(content);
+
+    // Remove scripts, styles, and other non-content elements
+    $('script, style, link, meta').remove();
+
+    // Function to clean an element
+    function cleanElement(element: cheerio.Element) {
+      // Remove all attributes except for essential ones
+      const allowedAttributes = ['href', 'src', 'alt', 'title', 'for', 'type'];
+      Object.keys(element.attribs).forEach((attr) => {
+        if (!allowedAttributes.includes(attr)) {
+          $(element).removeAttr(attr);
+        }
+      });
+
+      // Recursively clean child elements
+      $(element)
+        .contents()
+        .each((_, el) => {
+          if (el.type === 'tag') {
+            cleanElement(el);
+          }
+        });
+    }
+
+    // Clean the body element and its children
+    cleanElement($('body')[0]);
+
+    // Get the cleaned HTML
+    const cleanedHtml = $('body').html() || '';
+
+    // Further cleaning: remove empty elements and whitespace
+    const finalHtml = cleanedHtml
+      .replace(/>\s+</g, '><') // Remove whitespace between tags
+      .replace(/<(\w+)><\/\1>/g, '') // Remove empty elements
+      .trim();
+
+    const violationsCriticalAndSerious = axeResults.violations.map((v) => {
+      const nodesStructured = v.nodes.map((n) => {
+        const cleandedNodes = {
+          html: n.html,
+          target: n.target,
+          improvement: '',
+        };
+        return cleandedNodes;
+      });
+      const structured = {
+        id: v.id,
+        description: v.description,
+        impact: v.impact,
+        help: v.help,
+        helpUrl: v.helpUrl,
+        element: nodesStructured,
+      };
+      return structured;
+    });
+
+    const imageAltTextViolations = violationsCriticalAndSerious.filter(
+      (v) => v.id === 'image-alt',
+    );
+    const colorContrastViolations = violationsCriticalAndSerious.filter(
+      (v) => v.id === 'color-contrast',
+    );
+    const ariaViolations = violationsCriticalAndSerious.filter(
+      (v) => ((v.id == 'link-name') || (v.id == 'button-name')),
+    );
+
+    let finalViolations = [];
+
+    if (imageAltTextViolations.length > 0) {
+      const newImageAltText = await Promise.all(imageAltTextViolations[0].element.map(async (el) => {
+        let altText: string;
+        const regex = /<img[^>]+src="([^"]+)"/;
+        const match = el.html.match(regex);
+        const src = match ? match[1] : '';
+        if (src == '') {
+          altText = 'could not find image sources';
+        }
+        altText = await generateAltText(src) ?? '';
+        const updatedHtml = el.html.replace(/<img(.*?)>/, (matches, p1) => {
+          // Jika sudah ada alt di dalam tag, ganti nilainya
+          if (/alt="[^"]*"/.test(p1)) {
+            return matches.replace(/alt="[^"]*"/, `alt="${altText}"`);
+          } else {
+            // Jika tidak ada, tambahkan alt di akhir
+            return `<img${p1} alt="${altText}">`;
+          }
+        });
+        return {
+          html: el.html,
+          target: el.target,
+          improvement: updatedHtml,
+        };
+      }));
+      // console.log(newImageAltText);
+      finalViolations.push(
+        {
+          ...imageAltTextViolations[0],
+          element: newImageAltText,
+        },
+      );
+    }
+
+    if (ariaViolations.length > 0) {
+      const newAriaViariaViolations = await Promise.all(ariaViolations.map( async (v) => {
+        const newDetails = await Promise.all(v.element.map(async (el) => {
+          const improvement = await generateAIImprovement(el.html, `Add ONLY ARIA to fix this: ${v.help}, and dont change anything else.`);
+          return {
+            html: el.html,
+            target: el.target,
+            improvement: improvement,
+          };
+        }));
+        return {
+          ...v,
+          element: newDetails,
+        };
+      }));
+      finalViolations.push(
+        {
+          ...ariaViolations[0],
+          element: newAriaViariaViolations,
+        },
+      );
+    }
+
+    finalViolations.push({ ...colorContrastViolations[0] });
+
+    console.log(finalViolations);
+
+    res.json({
+      // cleanedHtml: finalHtml,
+      accessibilityResults: {
+        finalViolations,
+      },
+    });
+  } catch (error) {
+    console.error('Error during HTML processing:', error);
+    res.status(500).json({ error: 'Error during HTML processing' });
+  }
+});
+
+router.post<{}, {}>('/check-img', async (req, res) => {
+  // const { url } = req.body;
+  await generateAltText('https://media.go2speed.org/brand/files/niagahosterid/1/ads-persona-offline-to-online-business-cloud-hosting-affiliate-336-x-280 (1) (1).png');
+});
+
+const scrapeAndCleanData3 = async (url: string) => {
+  const loader = new PuppeteerWebBaseLoader(url, {
+    launchOptions: {
+      headless: 'new',
+    },
+    async evaluate(page, browser) {
+      // Scroll to bottom to trigger lazy loading
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+
+      const content = await page.content();
+      await browser.close();
+      return content;
+    },
   });
-  
-  const result = await ragChain.invoke({
-    question,
-    chat_history: transformedHistory,
-  });
-  
-  const updatedHistory: ChatMessage[] = [
-    ...history,
-    { role: 'user', content: question, evidence: [] },
-    { role: 'ai', content: result.answer, evidence: result.evidence },
+
+  const docs = await loader.load();
+  const pageContent = docs[0].pageContent;
+
+  const $ = cheerio.load(pageContent);
+
+  // Remove non-content elements that do not contribute to navigation and accessibility
+  $('script, style').remove();
+
+  // Extract relevant elements
+  const relevantElements = $('body')
+    .find(
+      'a, button, input, img, [role], h1, h2, h3, h4, h5, h6, li, ul, ol, section, article',
+    )
+    .map((i, element) => {
+      const el = $(element);
+      return {
+        tagName: el.prop('tagName'),
+        textContent: el.text().trim(),
+        htmlContent: el.html()?.trim(),
+        attributes: el.attr(),
+        parentTag: el.parent().prop('tagName'),
+        parentAttributes: el.parent().attr(),
+      };
+    })
+    .get();
+
+  // Prepare document with extracted data
+  const documents = [
+    new Document({
+      pageContent: JSON.stringify(relevantElements),
+      metadata: { url: url },
+    }),
   ];
 
-  res.json({
-    answer: {
-      answer: result.answer,
-      evidence: result.evidence,
+  return documents;
+};
+
+const scrapeForAccessibilityAI = async (url: string) => {
+  const loader = new PuppeteerWebBaseLoader(url, {
+    launchOptions: { headless: 'new' },
+    async evaluate(page) {
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      const content = await page.content();
+      return content;
     },
-    history: updatedHistory,
   });
 
-});
+  const documents = await loader.load();
+  const pageContent = documents[0].pageContent;
+  const $ = cheerio.load(pageContent);
 
-router.post<{}, {}>('/test', async (req: TypedRequestBody<AiRequestBody>, res) => {
-  const { url } = req.body;
-  const docs = await scrapeAndCleanData(url);
-  console.log(docs);
-  console.log(docs.length);
-  res.json({ docs: docs[0].pageContent });
-});
+  $('script, style').remove(); // Remove elements that are not needed
+
+  const structuredData = {
+    title: $('title').text(),
+    headings: $('h1, h2, h3, h4, h5, h6')
+      .map((i, el) => ({
+        level: el.name,
+        text: $(el).text().trim(),
+        index: i,
+      }))
+      .get(),
+    paragraphs: $('p')
+      .map((i, el) => ({
+        text: $(el).text().trim(),
+        index: i,
+      }))
+      .get(),
+    links: $('a')
+      .map((i, el) => ({
+        href: $(el).attr('href'),
+        text: $(el).text().trim() || $(el).attr('aria-label') || '',
+        classes: $(el).attr('class')?.split(/\s+/).join(' '),
+        index: i,
+      }))
+      .get(),
+    buttons: $(
+      'button, input[type="button"], input[type="submit"], .button, .btn',
+    )
+      .map((i, el) => ({
+        text: $(el).text().trim(),
+        classes: $(el).attr('class')?.split(/\s+/).join(' '),
+        role: $(el).attr('role'),
+        index: i,
+      }))
+      .get(),
+    inputs: $('input, select, textarea')
+      .map((i, el) => ({
+        type: $(el).attr('type') || el.name.toLowerCase(),
+        placeholder: $(el).attr('placeholder'),
+        ariaLabel: $(el).attr('aria-label'),
+        classes: $(el).attr('class')?.split(/\s+/).join(' '),
+        index: i,
+      }))
+      .get(),
+    images: $('img')
+      .map((i, el) => ({
+        src: $(el).attr('src'),
+        alt: $(el).attr('alt'),
+        width: $(el).attr('width'),
+        height: $(el).attr('height'),
+        index: i,
+      }))
+      .get(),
+    ariaRoles: $('[role]')
+      .map((i, el) => ({
+        role: $(el).attr('role'),
+        text: $(el).text().trim(),
+        ariaLabel: $(el).attr('aria-label'),
+        index: i,
+      }))
+      .get(),
+    landmarks: $('header, nav, main, footer, aside, section[aria-label]')
+      .map((i, el) => ({
+        type: el.name,
+        ariaLabel: $(el).attr('aria-label'),
+        index: i,
+      }))
+      .get(),
+  };
+
+  return {
+    url,
+    structuredData,
+    fullHtml: $.html(),
+  };
+};
+
+router.post<{}, {}>(
+  '/analyze2',
+  async (req: TypedRequestBody<AiRequestBody>, res) => {
+    const { url } = req.body;
+    const docs = await scrapeAndCleanData3(url);
+    console.log(docs[0].pageContent);
+    res.json({ docs: docs[0].pageContent });
+  },
+);
+
+// Define Document class as needed
 
 export default router;
