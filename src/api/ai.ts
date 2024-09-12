@@ -46,7 +46,6 @@ import puppeteer from 'puppeteer';
 import { generateAltText } from '../services/generateAltText';
 import { generateAIImprovement } from '../services/generateAIImprovement';
 
-
 const router = express.Router();
 
 interface SemanticElement {
@@ -766,7 +765,6 @@ router.post<{}, {}>('/transcribe-audio', async (req, res) => {
   }
 });
 
-
 router.post<{}, {}>('/improve-accessibility', async (req, res) => {
   try {
     const { url } = req.body;
@@ -775,9 +773,13 @@ router.post<{}, {}>('/improve-accessibility', async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
     // const puppeteer = new Puppeteer();
+    console.log('flag 1');
     const browser = await puppeteer.launch({ headless: 'new' });
+    console.log('flag 2');
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle0' });
+    console.log('flag 3');
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 60000 });
+    console.log('flag 4');
 
     // Perform accessibility analysis
     const axeResults = await new AxePuppeteer(page)
@@ -791,6 +793,8 @@ router.post<{}, {}>('/improve-accessibility', async (req, res) => {
         // 'html-has-lang',
       ])
       .analyze();
+
+    console.log('flag 5');
 
     // Get the page content
     const content = await page.content();
@@ -861,66 +865,72 @@ router.post<{}, {}>('/improve-accessibility', async (req, res) => {
       (v) => v.id === 'color-contrast',
     );
     const ariaViolations = violationsCriticalAndSerious.filter(
-      (v) => ((v.id == 'link-name') || (v.id == 'button-name')),
+      (v) => v.id == 'link-name' || v.id == 'button-name',
     );
 
     let finalViolations = [];
 
     if (imageAltTextViolations.length > 0) {
-      const newImageAltText = await Promise.all(imageAltTextViolations[0].element.map(async (el) => {
-        let altText: string;
-        const regex = /<img[^>]+src="([^"]+)"/;
-        const match = el.html.match(regex);
-        const src = match ? match[1] : '';
-        if (src == '') {
-          altText = 'could not find image sources';
-        }
-        altText = await generateAltText(src) ?? '';
-        const updatedHtml = el.html.replace(/<img(.*?)>/, (matches, p1) => {
-          // Jika sudah ada alt di dalam tag, ganti nilainya
-          if (/alt="[^"]*"/.test(p1)) {
-            return matches.replace(/alt="[^"]*"/, `alt="${altText}"`);
-          } else {
-            // Jika tidak ada, tambahkan alt di akhir
-            return `<img${p1} alt="${altText}">`;
+      const newImageAltText = await Promise.all(
+        imageAltTextViolations[0].element.map(async (el) => {
+          let altText: string;
+          const regex = /<img[^>]+src="([^"]+)"/;
+          const match = el.html.match(regex);
+          const src = match ? match[1] : '';
+          if (src == '') {
+            altText = 'could not find image sources';
           }
-        });
-        return {
-          html: el.html,
-          target: el.target,
-          improvement: updatedHtml,
-        };
-      }));
-      // console.log(newImageAltText);
-      finalViolations.push(
-        {
-          ...imageAltTextViolations[0],
-          element: newImageAltText,
-        },
-      );
-    }
-
-    if (ariaViolations.length > 0) {
-      const newAriaViariaViolations = await Promise.all(ariaViolations.map( async (v) => {
-        const newDetails = await Promise.all(v.element.map(async (el) => {
-          const improvement = await generateAIImprovement(el.html, `Add ONLY ARIA to fix this: ${v.help}, and dont change anything else.`);
+          altText = (await generateAltText(src)) ?? '';
+          const updatedHtml = el.html.replace(/<img(.*?)>/, (matches, p1) => {
+            // Jika sudah ada alt di dalam tag, ganti nilainya
+            if (/alt="[^"]*"/.test(p1)) {
+              return matches.replace(/alt="[^"]*"/, `alt="${altText}"`);
+            } else {
+              // Jika tidak ada, tambahkan alt di akhir
+              return `<img${p1} alt="${altText}">`;
+            }
+          });
           return {
             html: el.html,
             target: el.target,
-            improvement: improvement,
+            improvement: updatedHtml,
           };
-        }));
-        return {
-          ...v,
-          element: newDetails,
-        };
-      }));
-      finalViolations.push(
-        {
-          ...ariaViolations[0],
-          element: newAriaViariaViolations,
-        },
+        }),
       );
+      // console.log(newImageAltText);
+      finalViolations.push({
+        ...imageAltTextViolations[0],
+        element: newImageAltText,
+      });
+    }
+
+    if (ariaViolations.length > 0) {
+      const newAriaViolations = await Promise.all(
+        ariaViolations.flatMap(async (v) => {
+          const newDetails = await Promise.all(
+            v.element.map(async (el) => {
+              const improvement = await generateAIImprovement(
+                el.html,
+                `Add ONLY ARIA to fix this: ${v.help}, and dont change anything else.`,
+              );
+              return {
+                html: el.html,
+                target: el.target,
+                improvement: improvement,
+              };
+            }),
+          );
+          return {
+            id: v.id,
+            description: v.description,
+            impact: v.impact,
+            help: v.help,
+            helpUrl: v.helpUrl,
+            element: newDetails,
+          };
+        }),
+      );
+      finalViolations.push(...newAriaViolations);
     }
 
     finalViolations.push({ ...colorContrastViolations[0] });
@@ -928,10 +938,7 @@ router.post<{}, {}>('/improve-accessibility', async (req, res) => {
     console.log(finalViolations);
 
     res.json({
-      // cleanedHtml: finalHtml,
-      accessibilityResults: {
-        finalViolations,
-      },
+      finalViolations,
     });
   } catch (error) {
     console.error('Error during HTML processing:', error);
@@ -941,7 +948,9 @@ router.post<{}, {}>('/improve-accessibility', async (req, res) => {
 
 router.post<{}, {}>('/check-img', async (req, res) => {
   // const { url } = req.body;
-  await generateAltText('https://media.go2speed.org/brand/files/niagahosterid/1/ads-persona-offline-to-online-business-cloud-hosting-affiliate-336-x-280 (1) (1).png');
+  await generateAltText(
+    'https://media.go2speed.org/brand/files/niagahosterid/1/ads-persona-offline-to-online-business-cloud-hosting-affiliate-336-x-280 (1) (1).png',
+  );
 });
 
 const scrapeAndCleanData3 = async (url: string) => {
