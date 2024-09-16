@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 
 export const generateAltText = async (url: string) => {
+  console.log(url);
   const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
   });

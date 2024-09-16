@@ -1,0 +1,16 @@
+export const axeRules = [
+  'color-contrast',
+  'image-alt',
+  'aria-required-attr',
+  'link-name',
+  'button-name',
+  'label',
+  'html-has-lang',
+  'html-lang-valid',
+  'input-button-name',
+  'meta-viewport',
+  'select-name',
+  'frame-title',
+  'aria-valid-attr-value',
+  'image-redundant-alt',
+];
