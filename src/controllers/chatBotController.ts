@@ -9,25 +9,30 @@ export const handleAIResponse = async (req: Request<{}, AiResponse, AiRequestBod
   const { llm, embeddings, pineconeIndex, reranker } = initializeAIComponents();
 
   const vectorStore = await getOrCreateVectorStore(url, pineconeIndex, embeddings);
+  console.log(vectorStore);
   const ragChain = createRAGChain(llm, vectorStore, reranker);
 
-  const result = await ragChain.invoke({ question, chat_history: history });
+  // console.log('masalah sampe sini');
+  
+  const result = await ragChain.invoke({ question, chat_history: history, url: url });
+  
+  // console.log('masalah sampe situ');
 
   const parsedResult = aiResponseSchema.parse(result);
 
   console.log(parsedResult.answer);
   console.log(parsedResult.evidence);
 
-  //   const updatedHistory = [
-  //     ...history,
-  //     { role: 'user', content: question, evidence: [] },
-  //     { role: 'ai', content: result.answer, evidence: result.evidence },
-  //   ];
+  const updatedHistory = [
+    ...history,
+    { role: 'user', content: question, evidence: [] },
+    { role: 'ai', content: parsedResult.answer, evidence: parsedResult.evidence },
+  ];
 
-//   res.json({
-//     answer: { answer: result.answer, evidence: result.evidence },
-//     history: updatedHistory,
-//   });
+  res.json({
+    answer: { answer: parsedResult.answer, evidence: parsedResult.evidence },
+    history: updatedHistory,
+  });
 };
 
 export const handleTestResponse = async (req: Request<{}, {}, AiRequestBody>, res: Response) => {
