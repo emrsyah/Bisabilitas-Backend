@@ -10,7 +10,7 @@ export const getKbbiDefinition = async (word: string) => {
       {
         role: 'system',
         content: [
-          { type: 'text', text: 'Kamu adalah sebuah Kamus KBBI, saya akan memberika input berupa kata-kata dan kamu akan memberikan definisinya, HANYA BERIKAN DEFINISI NYA SAJA, jangan berikan apapun lagi.' },
+          { type: 'text', text: 'Kamu adalah sebuah Kamus KBBI, saya akan memberika input berupa kata dan kamu akan memberikan definisinya, HANYA BERIKAN DEFINISINYA SAJA, jangan berikan apapun lagi. Apabila memang yang diberikan bukan sebuah kata valid, maka berikan pesan error seperti ini: "Tak dapat menemukan definisi kata {kata}". Jika kata-kata punya lebih dari 1 arti, pisahkan saja dengan tanda titik koma (;)' },
         ],
       },
       {

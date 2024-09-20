@@ -57,7 +57,7 @@ router.post<{}, {}>('/transcribe-audio', async (req, res) => {
   }
 });
 
-router.post<{}, {}>('/kbbi', kbbiController);
+router.get<{}, {}>('/kbbi', kbbiController);
 
 router.post<{}, {}>('/improve-accessibility', improveAccessibilityController);
 

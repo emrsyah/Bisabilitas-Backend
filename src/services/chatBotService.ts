@@ -76,7 +76,7 @@ const createCustomRagPrompt = () => {
   4. Use bullet points or numbered lists if applicable for better clarity.
   5. **Cite evidence** from the context in your answer using numbered references like [1], [2], etc., linking the citation directly to the relevant quote.
   6. You must provide **at least 1 direct quote** from the context for each key part of your answer, with a maximum of 10 words per quote.
-  7. Respond to the question in the **language of the question**.
+  7. Respond to the question in the language that being used in the question.
   8. Structure your response in JSON into two parts: the answer and the evidence. The format should be as follows:
   9. First, identify the evidence you want to use from the context, then answer the question using that evidence.
   10. The evidence MUST BE an EXACT COPY PASTE from the context, preserving the original language of the website.
@@ -194,14 +194,18 @@ export const getOrCreateVectorStore = async (
     // console.log('Documents:', documents);
     // console.log('Splitted documents:', splitted);
 
-    return PineconeStore.fromDocuments(splitted, embeddings, {
-      pineconeIndex,
-    });
-  } else {
-    return PineconeStore.fromExistingIndex(embeddings, {
+    const pineconeStore = await PineconeStore.fromExistingIndex(embeddings, {
       pineconeIndex,
       filter: { url: { $eq: url } },
     });
+    await pineconeStore.addDocuments(splitted);
+    return pineconeStore;
+  } else {
+    const pineconeStore = await PineconeStore.fromExistingIndex(embeddings, {
+      pineconeIndex,
+      filter: { url: { $eq: url } },
+    });
+    return pineconeStore;
   }
 };
 
