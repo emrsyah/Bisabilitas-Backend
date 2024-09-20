@@ -7,6 +7,7 @@ import {
 } from '../services/transcribeAudio';
 import { improveAccessibilityController } from '../controllers/accesibilityController';
 import { handleAIResponse } from '../controllers/chatBotController';
+import { kbbiController } from '../controllers/kbbiController';
 
 const router = express.Router();
 
@@ -55,6 +56,8 @@ router.post<{}, {}>('/transcribe-audio', async (req, res) => {
     res.status(500).send('Error during transcription');
   }
 });
+
+router.post<{}, {}>('/kbbi', kbbiController);
 
 router.post<{}, {}>('/improve-accessibility', improveAccessibilityController);
 
