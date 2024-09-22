@@ -4,7 +4,7 @@ import {
 import { Document } from 'langchain/document';
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { HtmlToTextTransformer } from '@langchain/community/document_transformers/html_to_text';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';
 import { DocumentInterface } from '@langchain/core/documents';
 
 export const scrapeAndCleanData = async (
@@ -41,17 +41,23 @@ export const scrapeAndCleanData = async (
   const $ = cheerio.load(pageContent);
   
   // Remove scripts, styles, and other non-content elements
-  $('script, style, nav, footer, header').remove();
+  $('script, style, header').remove();
   
   const cleanedText = $('body').html() ?? '';
   const cleaned$ = cheerio.load(cleanedText);
   
   const textContent = cleaned$('body').text();
+
+  console.log('text content==========', textContent);
   
   // Remove non-printable characters
   const docsC = textContent.replace(/[^\x20-\x7E]+/g, ' ').trim();
+
+  console.log('removable non printable =========', docsC);
   
   const docsCNoEmptyLines = docsC.replace(/^\s*[\r\n]/gm, '');
+
+  console.log('removeed empty lines==========', docsCNoEmptyLines);
   
   const documents = [
     new Document({ pageContent: docsCNoEmptyLines, metadata: { url: url } }),
