@@ -5,34 +5,31 @@ import { AiRequestBody, AiResponse } from '../interfaces/ChatBot';
 import { aiResponseSchema } from '../schemas/aiChatbotSchemas';
 
 export const handleAIResponse = async (req: Request<{}, AiResponse, AiRequestBody>, res: Response) => {
-  const { url, history, question } = req.body;
-  const { llm, embeddings, pineconeIndex, reranker } = initializeAIComponents();
+  try {
+    const { url, history, question } = req.body;
+    const { llm, embeddings, pineconeIndex, reranker } = initializeAIComponents();
 
-  const vectorStore = await getOrCreateVectorStore(url, pineconeIndex, embeddings);
-  console.log(vectorStore);
-  const ragChain = createRAGChain(llm, vectorStore, reranker);
+    const vectorStore = await getOrCreateVectorStore(url, pineconeIndex, embeddings);
+    console.log(vectorStore);
+    const ragChain = createRAGChain(llm, vectorStore, reranker);
 
-  // console.log('masalah sampe sini');
-  
-  const result = await ragChain.invoke({ question, chat_history: history, url: url });
-  
-  // console.log('masalah sampe situ');
+    const result = await ragChain.invoke({ question, chat_history: history, url: url });
+    const parsedResult = aiResponseSchema.parse(result);
 
-  const parsedResult = aiResponseSchema.parse(result);
+    const updatedHistory = [
+      ...history,
+      { role: 'user', content: question, evidence: [] },
+      { role: 'ai', content: parsedResult.answer, evidence: parsedResult.evidence },
+    ];
 
-  console.log(parsedResult.answer);
-  console.log(parsedResult.evidence);
-
-  const updatedHistory = [
-    ...history,
-    { role: 'user', content: question, evidence: [] },
-    { role: 'ai', content: parsedResult.answer, evidence: parsedResult.evidence },
-  ];
-
-  res.json({
-    answer: { answer: parsedResult.answer, evidence: parsedResult.evidence },
-    history: updatedHistory,
-  });
+    res.json({
+      answer: { answer: parsedResult.answer, evidence: parsedResult.evidence },
+      history: updatedHistory,
+    });
+  } catch (error) {
+    console.error('Error in handleAIResponse:', error);
+    res.status(500).json({ error: error });
+  }
 };
 
 export const handleTestResponse = async (req: Request<{}, {}, AiRequestBody>, res: Response) => {

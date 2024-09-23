@@ -12,6 +12,7 @@ import { aiResponseSchema } from '../schemas/aiChatbotSchemas';
 import { ChatPromptTemplate, MessagesPlaceholder, PromptTemplate } from '@langchain/core/prompts';
 import { VectorStoreRetriever } from '@langchain/core/vectorstores';
 import { DocumentInterface } from '@langchain/core/documents';
+import { AIMessage, HumanMessage } from '@langchain/core/messages';
 
 type AIProvider = 'GEMINI' | 'MISTRAL' | 'OPENAI';
 
@@ -47,6 +48,17 @@ const AI_PROVIDER_CONFIG: Record<AIProvider, {
     vectorDimension: 1536,
   },
 };
+
+function convertChatHistory(customHistory: any[]): (HumanMessage | AIMessage)[] {
+  return customHistory.map(entry => {
+    if (entry.role === 'user') {
+      return new HumanMessage(entry.content);
+    } else if (entry.role === 'ai') {
+      return new AIMessage(entry.content);
+    }
+    throw new Error(`Unknown role in chat history: ${entry.role}`);
+  });
+}
   
 
 const createContextualizeQChain = (llm: ChatMistralAI | ChatGoogleGenerativeAI | ChatOpenAI) => {
@@ -74,22 +86,18 @@ const createCustomRagPrompt = () => {
   2. Provide your response in **Markdown format** for better readability, ensuring it is clear, concise (3-6 sentences), and informative.
   3. Include subheadings if the answer addresses multiple aspects.
   4. Use bullet points or numbered lists if applicable for better clarity.
-  5. **Cite evidence** from the context in your answer using numbered references like [1], [2], etc., linking the citation directly to the relevant quote.
-  6. You must provide **at least 1 direct quote** from the context for each key part of your answer, with a maximum of 10 words per quote.
-  7. Respond to the question in the language that being used in the question.
-  8. Structure your response in JSON into two parts: the answer and the evidence. The format should be as follows:
-  9. First, identify the evidence you want to use from the context, then answer the question using that evidence.
-  10. The evidence MUST BE an EXACT COPY PASTE from the context, preserving the original language of the website.
-  11. For evidence, use the first 3-4 words of the relevant context as the citation.
+  5. Respond to the question in the language that being used in the question.
+  6. Structure your response in JSON into two parts: the answer and the evidence. The format should be as follows:
+  7. First, identify the evidence you want to use from the context, then answer the question using that evidence.
+  8. The evidence MUST BE an EXACT COPY PASTE from the context, preserving the original language of the website.
+  9. The Maximum Evidence is 5 Evidence.
   
-  
-    "answer": "Your markdown-formatted answer with citations  tags in the form [1], [2], etc. (the citation must be at the end of the sentence that used that citation).",
+    "answer": "Your markdown-formatted answer.",
     "evidence": [
-      "[1]: Exact quote from context in original language (max 10 words)",
-      "[2]: Another exact quote from context in original language (max 10 words)",
-      "[3]: Further exact quote from context in original language (max 10 words)"
+      "Exact quote from context in original language",
+      "Another exact quote from context in original language",
+      "Further exact quote from context in original language"
     ]
-  
   
   Ensure your answer directly addresses the user's question while adhering to these rules. The response should be both accurate and clearly linked to the provided context.
   
@@ -111,7 +119,11 @@ const retrieveAndRerank = async (
 ) => {
   let docs: DocumentInterface<Record<string, any>>[];
   if (input.chat_history && (input.chat_history as any[]).length > 0) {
-    const contextualizedQ = await contextualizeQChain.invoke(input);
+    const convertedChatHistory = convertChatHistory(input.chat_history as any[]);
+    const contextualizedQ = await contextualizeQChain.invoke({
+      chat_history: convertedChatHistory,
+      question: input.question,
+    });
     docs = await retriever.invoke(contextualizedQ);
   } else {
     docs = await retriever.invoke(`this is the website url: ${input.url}, and the question is ` + input.question as string);
@@ -194,11 +206,16 @@ export const getOrCreateVectorStore = async (
     // console.log('Documents:', documents);
     // console.log('Splitted documents:', splitted);
 
+    await PineconeStore.fromDocuments(splitted, embeddings, {
+      pineconeIndex,
+      filter: { url: { $eq: url } },
+    });
+    await setTimeout(() => {
+    }, 3000);
     const pineconeStore = await PineconeStore.fromExistingIndex(embeddings, {
       pineconeIndex,
       filter: { url: { $eq: url } },
     });
-    await pineconeStore.addDocuments(splitted);
     return pineconeStore;
   } else {
     const pineconeStore = await PineconeStore.fromExistingIndex(embeddings, {
